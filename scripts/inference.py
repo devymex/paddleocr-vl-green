@@ -84,12 +84,22 @@ def main():
                         help="Path to PP-DocLayoutV3 ONNX model")
     parser.add_argument("--recursive", action="store_true",
                         help="Recursively scan input directory for images")
+    parser.add_argument(
+        "--device",
+        choices=["cpu", "cuda"],
+        default=None,
+        help="Device to use for recognition/layout. Use 'cpu' to force CPU-only.",
+    )
     args = parser.parse_args()
 
     print(f"[*] Loading layout model: {args.layout_onnx}")
-    layout = LayoutDetector(args.layout_onnx)
+    if args.device == "cpu":
+        print("[*] Forcing layout ONNX to use CPUExecutionProvider")
+        layout = LayoutDetector(args.layout_onnx, providers=["CPUExecutionProvider"])
+    else:
+        layout = LayoutDetector(args.layout_onnx)
     print(f"[*] Loading VL model:     {args.model_path}")
-    vl = VLRecognizer(args.model_path)
+    vl = VLRecognizer(args.model_path, device=args.device)
 
     image_files = get_image_files(args.images, args.recursive)
     if not image_files:
