@@ -1,0 +1,15 @@
+# Requirements for paddleocr-vl
+# Versions are left unpinned; pin them as needed for your environment.
+numpy
+opencv-python
+onnxruntime
+torch
+torchvision
+Pillow
+transformers
+einops
+Flask
+
+# Optional / conditional extras you may want depending on your setup:
+# flash-attn  # GPU-accelerated attention (optional)
+# onnxruntime-gpu  # if you need GPU support for ONNX runtime
