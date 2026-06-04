@@ -184,25 +184,45 @@ class Ernie4_5RotaryEmbedding(nn.Module):
     @torch.no_grad()
     @dynamic_rope_update  # power user: used with advanced RoPE types (e.g. dynamic rope)
     def forward(self, x, position_ids):
-        inv_freq_expanded = (
-            self.inv_freq[None, :, None]  # type: ignore[index]
-            .float()
-            .expand(position_ids.shape[0], -1, 1)
-            .to(x.device)
-        )
-        position_ids_expanded = position_ids[:, None, :].float()
         device_type = (
             x.device.type
             if isinstance(x.device.type, str) and x.device.type != "mps"
             else "cpu"
         )
-        with torch.autocast(device_type=device_type, enabled=False):  # Force float32
-            freqs = (
-                inv_freq_expanded.float() @ position_ids_expanded.float()
-            ).transpose(1, 2)
-            emb = torch.cat((freqs, freqs), dim=-1)
-            cos = emb.cos() * self.attention_scaling
-            sin = emb.sin() * self.attention_scaling
+        if position_ids.dim() == 3:
+            # mrope format: (mrope_dim=3, batch, seq) — compute per-dimension embeddings
+            # inv_freq_expanded: (3, batch, dim//2, 1)
+            inv_freq_expanded = (
+                self.inv_freq[None, None, :, None]  # type: ignore[index]
+                .float()
+                .expand(position_ids.shape[0], position_ids.shape[1], -1, 1)
+                .to(x.device)
+            )
+            # position_ids_expanded: (3, batch, 1, seq)
+            position_ids_expanded = position_ids[:, :, None, :].float()
+            with torch.autocast(device_type=device_type, enabled=False):
+                # freqs: (3, batch, dim//2, seq) -> transpose -> (3, batch, seq, dim//2)
+                freqs = (
+                    inv_freq_expanded.float() @ position_ids_expanded.float()
+                ).transpose(-2, -1)
+                emb = torch.cat((freqs, freqs), dim=-1)
+                cos = emb.cos() * self.attention_scaling
+                sin = emb.sin() * self.attention_scaling
+        else:
+            inv_freq_expanded = (
+                self.inv_freq[None, :, None]  # type: ignore[index]
+                .float()
+                .expand(position_ids.shape[0], -1, 1)
+                .to(x.device)
+            )
+            position_ids_expanded = position_ids[:, None, :].float()
+            with torch.autocast(device_type=device_type, enabled=False):  # Force float32
+                freqs = (
+                    inv_freq_expanded.float() @ position_ids_expanded.float()
+                ).transpose(1, 2)
+                emb = torch.cat((freqs, freqs), dim=-1)
+                cos = emb.cos() * self.attention_scaling
+                sin = emb.sin() * self.attention_scaling
 
         # keeping it in full precision
         return cos, sin
@@ -1885,6 +1905,136 @@ class PaddleOCRVLForConditionalGeneration(Ernie4_5PreTrainedModel, GenerationMix
 
         self.post_init()
 
+    @classmethod
+    def from_pretrained(cls, pretrained_model_name_or_path, *model_args, **kwargs):
+        model = super().from_pretrained(
+            pretrained_model_name_or_path, *model_args, **kwargs
+        )
+        # Workaround for transformers >= 5.x: nested PreTrainedModel submodules
+        # (e.g. ``self.visual``) get re-initialized by ``_init_weights`` after the
+        # checkpoint is loaded, silently overwriting the pretrained vision-tower
+        # weights with random values (``from_pretrained`` still reports 0 missing
+        # keys). Re-apply the on-disk state dict to restore the correct weights.
+        try:
+            state_dict = cls._resolve_pretrained_state_dict(
+                pretrained_model_name_or_path, **kwargs
+            )
+            if state_dict:
+                target_dtype = next(model.parameters()).dtype
+                tensors = {}
+                model_state = model.state_dict()
+                for key, tensor in state_dict.items():
+                    ref = model_state.get(key)
+                    if ref is not None and ref.is_floating_point():
+                        tensor = tensor.to(target_dtype)
+                    tensors[key] = tensor
+                model.load_state_dict(tensors, strict=False)
+        except Exception:
+            # Best-effort: if anything goes wrong, fall back to the standard
+            # (potentially buggy) load rather than failing to construct.
+            pass
+        # Workaround for transformers >= 5.x: non-persistent buffers (e.g. the
+        # rotary embedding ``inv_freq`` and vision ``position_ids``) are NOT saved
+        # in the checkpoint and are NOT re-materialized after the meta-device load,
+        # leaving them as uninitialized GPU memory (garbage). This silently
+        # corrupts the rotary embeddings. Recompute them after loading.
+        try:
+            model._reinit_non_persistent_buffers()
+        except Exception:
+            pass
+        return model
+
+    def _reinit_non_persistent_buffers(self):
+        """Recompute non-persistent buffers that meta-device loading leaves stale.
+
+        Covers the rotary-embedding ``inv_freq`` buffers (any submodule exposing a
+        ``rope_init`` method) and the vision ``position_ids`` buffer.
+        """
+        for module in self.modules():
+            rope_init = getattr(module, "rope_init", None)
+            if callable(rope_init):
+                old = getattr(module, "inv_freq", None)
+                device = old.device if torch.is_tensor(old) else None
+                rope_init()
+                new = getattr(module, "inv_freq", None)
+                if device is not None and torch.is_tensor(new):
+                    module.inv_freq = new.to(device)
+                    if hasattr(module, "original_inv_freq"):
+                        module.original_inv_freq = module.inv_freq
+            if isinstance(module, PaddleOCRVisionEmbeddings):
+                pos = getattr(module, "position_ids", None)
+                device = pos.device if torch.is_tensor(pos) else None
+                new_pos = torch.arange(module.num_positions).expand((1, -1))
+                module.position_ids = (
+                    new_pos.to(device) if device is not None else new_pos
+                )
+
+    @staticmethod
+    def _resolve_pretrained_state_dict(pretrained_model_name_or_path, **kwargs):
+        """Load the full on-disk state dict for a local dir or hub checkpoint."""
+        import json
+        import os
+
+        from safetensors.torch import load_file as _safe_load
+
+        def _resolve(filename):
+            local = os.path.join(str(pretrained_model_name_or_path), filename)
+            if os.path.isfile(local):
+                return local
+            if os.path.isdir(str(pretrained_model_name_or_path)):
+                return None
+            try:
+                try:
+                    from transformers.utils.hub import cached_file
+                except Exception:
+                    from transformers.utils import cached_file
+
+                return cached_file(
+                    pretrained_model_name_or_path,
+                    filename,
+                    _raise_exceptions_for_missing_entries=False,
+                    revision=kwargs.get("revision"),
+                    cache_dir=kwargs.get("cache_dir"),
+                    token=kwargs.get("token"),
+                )
+            except Exception:
+                return None
+
+        def _load_index(index_path, loader):
+            with open(index_path, "r", encoding="utf-8") as handle:
+                index = json.load(handle)
+            shards = sorted(set(index.get("weight_map", {}).values()))
+            merged = {}
+            for shard in shards:
+                shard_path = _resolve(shard)
+                if shard_path is None:
+                    return None
+                merged.update(loader(shard_path))
+            return merged
+
+        # Single-file safetensors
+        path = _resolve("model.safetensors")
+        if path is not None:
+            return _safe_load(path)
+        # Sharded safetensors
+        path = _resolve("model.safetensors.index.json")
+        if path is not None:
+            merged = _load_index(path, _safe_load)
+            if merged:
+                return merged
+        # Single-file pytorch
+        path = _resolve("pytorch_model.bin")
+        if path is not None:
+            return torch.load(path, map_location="cpu", weights_only=True)
+        # Sharded pytorch
+        path = _resolve("pytorch_model.bin.index.json")
+        if path is not None:
+            return _load_index(
+                path,
+                lambda p: torch.load(p, map_location="cpu", weights_only=True),
+            )
+        return None
+
     def get_input_embeddings(self):
         return self.model.embed_tokens
 
@@ -2345,6 +2495,23 @@ class PaddleOCRVLForConditionalGeneration(Ernie4_5PreTrainedModel, GenerationMix
         )
 
         model_inputs["position_ids"] = None
+
+        # Ensure cache_position is present: transformers >= 5.x no longer keeps
+        # cache_position in model_kwargs between steps for non-remote-code models,
+        # but our forward() needs it to compute rope_deltas correctly in decode.
+        if "cache_position" not in model_inputs or model_inputs.get("cache_position") is None:
+            _ref = model_inputs.get("input_ids")
+            if _ref is None:
+                _ref = model_inputs.get("inputs_embeds")
+            _seq_len = _ref.shape[1] if _ref is not None else 1
+            _past_seen = (
+                past_key_values.get_seq_length()
+                if past_key_values is not None and hasattr(past_key_values, "get_seq_length")
+                else 0
+            )
+            model_inputs["cache_position"] = torch.arange(
+                _past_seen, _past_seen + _seq_len, device=input_ids.device
+            )
 
         _cp = model_inputs.get("cache_position", cache_position)
         _input_ids = model_inputs.get("input_ids", input_ids)
