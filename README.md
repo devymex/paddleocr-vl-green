@@ -65,56 +65,6 @@ git clone https://huggingface.co/PaddlePaddle/PaddleOCR-VL-1.6 \
 
 ## 程序说明
 
-### inference.py — 命令行批量推理
-
-对一张或多张文档图片执行推理，将结果保存为 HTML 文件。
-
-**用法：**
-
-```bash
-python inference.py <输入图片或目录> --out <输出路径> [可选参数]
-```
-
-**参数：**
-
-| 参数 | 说明 |
-|---|---|
-| `images` | 输入图片路径（文件或目录），支持 jpg / jpeg / png |
-| `--out` | 输出 HTML 路径；单文件时直接写入该路径，多文件时作为前缀并自动补充序号后缀 |
-| `--model-path` | VL 模型的本地目录或 HuggingFace repo id |
-| `--layout-onnx` | PP-DocLayoutV3 版面检测 ONNX 模型路径 |
-| `--recursive` | 递归扫描输入目录（仅对目录有效） |
-
-> 输入为目录时，默认只扫描第一层文件（按文件名排序），加 `--recursive` 后递归扫描所有子目录。
-
-**示例：**
-
-```bash
-# 处理单张图片
-CUDA_VISIBLE_DEVICES=0 python inference.py sample/contract.jpg \
-    --out output/contract.html \
-    --model-path /your/local/path/paddleocr-vl-1.6 \
-    --layout-onnx /your/local/path/pp_doclayoutv3.onnx
-
-# 处理整个目录（输出：output/results_00.html, output/results_01.html, ...）
-python inference.py sample/zcsq \
-    --out output/results.html \
-    --model-path /your/local/path/paddleocr-vl-1.6 \
-    --layout-onnx /your/local/path/pp_doclayoutv3.onnx
-```
-
-**输出说明：**
-
-生成的 HTML 文件包含：
-- 正文文本、标题的结构化排版
-- 表格（OTSL 格式转换为 HTML `<table>`）
-- 公式（LaTeX，通过 MathJax 渲染）
-- 图片、图表区域的占位说明
-
-直接用浏览器打开即可查看渲染结果。
-
----
-
 ### scripts/server.py — HTTP 推理服务
 
 将模型以服务形式常驻内存，通过 HTTP 接口接收请求，避免每次推理重复加载模型的开销。支持多进程（多卡）并发推理，并发请求进入 FIFO 队列并自动分发给空闲 worker。
@@ -177,3 +127,54 @@ GPU 序号为逻辑编号，受环境变量 `CUDA_VISIBLE_DEVICES` 控制。例�
 
 - `format=json`：返回结构化 JSON，格式为 `{"blocks": [{"label": "...", "content": "..."}, ...]}`
 - `format=html`：返回完整 HTML 页面（含 MathJax），可直接在浏览器中展示
+
+### scripts/test.py — 并发性能测试
+
+用于测试 HTTP 推理服务的并发处理能力和输出正确性。该脚本向运行中的服务器发送多个并发请求，使用相同的测试图片，验证响应的 HTML 与预期输出是否一致，并汇总统计结果。
+
+**功能：**
+
+- 等待服务器 `/health` 端点就绪；
+- 读取本地测试图片（默认 `sample/contract.jpg`）并转换为 base64；
+- 向 `/process` 端点发送指定数量的并发请求；
+- 逐一比对响应的 HTML 内容与预期文件（默认 `output/contract.html`）；
+- 输出统计汇总（成功/失败/错误数）。
+
+**用法：**
+
+```bash
+# 默认配置：本地服务器 127.0.0.1:5000，8 个并发请求
+python scripts/test.py
+
+# 自定义并发数和服务器地址
+python scripts/test.py --concurrency 16 --host 192.168.1.100 --port 8080
+
+# 指定不同的测试图片和预期输出
+python scripts/test.py \
+    --image sample/wlyy/a_0.jpg \
+    --expected output/wlyy/a_0.html
+
+# 调整超时时间
+python scripts/test.py \
+    --health-timeout 60 \
+    --request-timeout 120
+```
+
+**参数说明：**
+
+| 参数 | 默认值 | 说明 |
+|---|---|---|
+| `--host` | `0.0.0.0` | 服务器绑定地址（自动调整为 `127.0.0.1` 用于客户端连接） |
+| `--port` | `5000` | 服务器端口 |
+| `--concurrency` | `8` | 并发请求数 |
+| `--image` | `sample/contract.jpg` | 测试图片路径 |
+| `--expected` | `output/contract.html` | 预期 HTML 输出路径 |
+| `--health-timeout` | `120` | 等待服务器就绪的超时时间（秒） |
+| `--request-timeout` | `60` | 单个请求的超时时间（秒） |
+
+**返回值：**
+
+- `0`：所有请求成功且输出匹配预期
+- `2`：测试图片或预期输出文件不存在
+- `3`：服务器未在规定时间内就绪
+- `4`：存在请求错误或输出不匹配
