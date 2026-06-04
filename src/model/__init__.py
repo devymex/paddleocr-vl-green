@@ -8,8 +8,17 @@ compat shims for newer / older transformers versions are applied here.
 
 import inspect
 import warnings
+import logging
 
 import torch
+
+# Suppress known benign transformers logger messages (>= 5.x compatibility)
+logging.getLogger("transformers.modeling_rope_utils").setLevel(logging.ERROR)
+logging.getLogger("transformers.configuration_utils").setLevel(logging.ERROR)
+logging.getLogger("transformers").setLevel(logging.WARNING)  # Keep errors, suppress lower levels
+
+# Suppress transformers FutureWarning
+warnings.filterwarnings("ignore", message=".*rope_config_validation.*", category=FutureWarning)
 
 # ----------------------------------------------------------------------------
 # Compat: newer transformers (>=4.56?) removed the "default" rope_type from

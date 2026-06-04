@@ -16,7 +16,7 @@
 ### 安装依赖
 
 ```bash
-pip install pillow numpy opencv-python torch transformers tokenizers onnxruntime
+pip install -r requirements.txt
 ```
 
 > 如有 GPU，可将 `onnxruntime` 替换为 `onnxruntime-gpu`，版面检测模型将自动使用 CUDA。
@@ -117,26 +117,54 @@ python inference.py sample/zcsq \
 
 ### scripts/server.py — HTTP 推理服务
 
-将模型以服务形式常驻内存，通过 HTTP 接口接收请求，避免每次推理重复加载模型的开销。适合需要频繁调用推理的场景。
-
-**额外依赖：**
-
-```bash
-pip install flask
-```
+将模型以服务形式常驻内存，通过 HTTP 接口接收请求，避免每次推理重复加载模型的开销。支持多进程（多卡）并发推理，并发请求进入 FIFO 队列并自动分发给空闲 worker。
 
 **启动：**
 
 ```bash
+# CPU 单 worker
 python scripts/server.py \
     --layout-onnx /path/to/pp_doclayoutv3.onnx \
     --model-path /path/to/paddleocr-vl-1.6 \
+    --device cpu
+
+# 单 GPU（1 个 worker，使用 GPU 0）
+CUDA_VISIBLE_DEVICES=0 python scripts/server.py \
+    --layout-onnx /path/to/pp_doclayoutv3.onnx \
+    --model-path /path/to/paddleocr-vl-1.6 \
+    --device cuda:0
+
+# 多卡多 worker（2 张卡，每卡 2 个 worker，共 4 个 worker）
+CUDA_VISIBLE_DEVICES=0,1 python scripts/server.py \
+    --layout-onnx /path/to/pp_doclayoutv3.onnx \
+    --model-path /path/to/paddleocr-vl-1.6 \
+    --device cuda:0,0,1,1 \
     [--host 0.0.0.0] [--port 5000]
 ```
 
+**`--device` 参数说明：**
+
+| 值 | worker 数 | 说明 |
+|---|:---:|---|
+| `cpu` | 1 | 单 CPU worker |
+| `cuda` | 1 | 等价于 `cuda:0`（简写） |
+| `cuda:0` | 1 | GPU 0 上的 1 个 worker |
+| `cuda:0,1` | 2 | GPU 0 和 GPU 1 各 1 个 worker |
+| `cuda:0,0,1,1` | 4 | GPU 0 和 GPU 1 各 2 个 worker |
+
+GPU 序号为逻辑编号，受环境变量 `CUDA_VISIBLE_DEVICES` 控制。例如设置 `CUDA_VISIBLE_DEVICES=2,3` 后，`--device cuda:0,1` 实际使用物理 GPU 2 和 3。
+
+**并发处理机制：**
+
+- 主进程（Flask）以多线程模式接收并发 HTTP 请求；
+- 每个推理请求进入共享 FIFO 任务队列；
+- 各 worker 空闲时自动从队列取任务，实现负载均衡；
+- 每个 worker 运行独立的模型副本，互不干扰；
+- worker 使用 `spawn` 启动方式，避免 fork + CUDA 的潜在冲突。
+
 **接口：**
 
-`GET /health` — 健康检查，模型加载完成后返回 `200 ok`，否则返回 `503`。
+`GET /health` — 健康检查，全部 worker 加载完成后返回 `200 ok`，否则返回 `503`。
 
 `POST /process` — 处理单张图片。
 
@@ -149,5 +177,3 @@ python scripts/server.py \
 
 - `format=json`：返回结构化 JSON，格式为 `{"blocks": [{"label": "...", "content": "..."}, ...]}`
 - `format=html`：返回完整 HTML 页面（含 MathJax），可直接在浏览器中展示
-
-> 服务以单线程模式运行以避免 GPU 并发冲突。生产环境建议使用 gunicorn 并设置 `--workers 1`。

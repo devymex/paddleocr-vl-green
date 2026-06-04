@@ -54,8 +54,6 @@ from transformers.utils import (
     is_flash_attn_2_available,  # type: ignore[attr-defined]
     torch_int,  # type: ignore[attr-defined]
 )
-from transformers.utils.generic import check_model_inputs
-
 if is_flash_attn_2_available():
     from flash_attn import flash_attn_varlen_func  # type: ignore[import-not-found]
     from flash_attn.layers.rotary import apply_rotary_emb  # type: ignore[import-not-found]
@@ -582,7 +580,6 @@ class Ernie4_5Model(Ernie4_5PreTrainedModel):
         # Initialize weights and apply final processing
         self.post_init()
 
-    @check_model_inputs
     def forward(
         self,
         input_ids: Optional[torch.LongTensor] = None,

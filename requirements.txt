@@ -1,5 +1,3 @@
-# Requirements for paddleocr-vl
-# Versions are left unpinned; pin them as needed for your environment.
 numpy
 opencv-python
 onnxruntime
