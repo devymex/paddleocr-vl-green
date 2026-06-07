@@ -1,9 +1,25 @@
+#!/usr/bin/env python3
+"""PaddleOCR-VL Flask server — multi-worker, load-balanced edition.
+
+Supports a flexible ``--device`` spec identical to ``server.py`` so you can
+run multiple workers across one or more GPUs (or CPU):
+
+    python scripts/server_simple.py --device cpu
+    python scripts/server_simple.py --device cuda:0
+    python scripts/server_simple.py --device cuda:0,0,1,1   # 4 workers
+
+Each worker runs in its own process (spawned, not forked) and owns an
+independent copy of both models.  Flask threads dispatch tasks to the shared
+queue; the first idle worker picks up the task, providing natural FIFO +
+load-balanced concurrency.
+"""
 from __future__ import annotations
 
 import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+import argparse
 import base64
 import logging
 import multiprocessing as mp
@@ -11,7 +27,10 @@ from typing import List, Optional
 
 import cv2
 import numpy as np
+import torch
+
 from flask import Flask, jsonify, make_response, request
+from src import render_html, LayoutDetector, VLRecognizer, run_pipeline as _run_pipeline
 
 # --------------------------------------------------------------------------- #
 #  Logging                                                                    #
@@ -28,8 +47,7 @@ logger = logging.getLogger(__name__)
 # --------------------------------------------------------------------------- #
 
 app = Flask(__name__)
-# Allow large base64 payloads (up to ~100 MB raw JSON)
-app.config["MAX_CONTENT_LENGTH"] = 100 * 1024 * 1024
+app.config["MAX_CONTENT_LENGTH"] = 100 * 1024 * 1024  # 100 MB max request
 
 # Set by _start_workers(); accessed by Flask route handlers in the main process.
 _task_queue: Optional[mp.queues.Queue] = None  # type: ignore[type-arg]
@@ -40,25 +58,37 @@ _workers_ready: bool = False
 #  Device spec parsing                                                        #
 # --------------------------------------------------------------------------- #
 
-
-def parse_device(device_str: str) -> List[Optional[int]]:
+def parse_device(device_str: Optional[str]) -> List[Optional[int]]:
     """Parse a device spec string into a list of GPU IDs (``None`` = CPU).
+
+    If device_str is None, auto-detects: returns one GPU worker per available GPU,
+    or [None] if no GPUs are available.
 
     Examples::
 
-        "cpu"          -> [None]           # single CPU worker
+        None            -> [0, 1, ...]     # auto-detect: one worker per GPU (or [None] if no GPU)
+        "cpu"           -> [None]           # single CPU worker
+        "cuda"          -> [0]              # one worker on GPU 0
         "cuda:0"        -> [0]              # one worker on GPU 0
         "cuda:0,0,1,1"  -> [0, 0, 1, 1]    # 4 workers: 2 on GPU 0, 2 on GPU 1
 
     GPU indices are logical indices and respect ``CUDA_VISIBLE_DEVICES``.
     """
+    if device_str is None:
+        # Auto-detect: try to import torch and check CUDA availability
+        try:
+            if torch.cuda.is_available():
+                n_gpus = torch.cuda.device_count()
+                return list(range(n_gpus))
+        except ImportError:
+            pass
+        return [None]  # Fall back to CPU if no CUDA or torch not available
+
     s = device_str.strip().lower()
     if s == "cpu":
         return [None]
-    # accept bare 'cuda' as shorthand for the first GPU (0)
     if s == "cuda":
         return [0]
-    # accept 'cuda:' prefix only
     if s.startswith("cuda:"):
         parts_str = s.split(":", 1)[1]
         parts = [x.strip() for x in parts_str.split(",") if x.strip()]
@@ -77,7 +107,6 @@ def parse_device(device_str: str) -> List[Optional[int]]:
 # --------------------------------------------------------------------------- #
 #  Worker process                                                              #
 # --------------------------------------------------------------------------- #
-
 
 def _worker_fn(
     worker_id: int,
@@ -116,8 +145,6 @@ def _worker_fn(
 
     # Load models
     try:
-        from src import LayoutDetector, VLRecognizer, run_pipeline as _run_pipeline
-
         log.info("Loading LayoutDetector …")
         layout = LayoutDetector(layout_onnx, providers=ort_providers)
 
@@ -155,7 +182,6 @@ def _worker_fn(
 #  Internal helpers                                                           #
 # --------------------------------------------------------------------------- #
 
-
 def _decode_image(b64_str: str) -> np.ndarray:
     """Decode a base64-encoded image (with optional data-URI prefix) to BGR ndarray."""
     if "," in b64_str:
@@ -184,7 +210,6 @@ def _dispatch(img_bgr: np.ndarray, fmt: str) -> dict:
 # --------------------------------------------------------------------------- #
 #  Routes                                                                     #
 # --------------------------------------------------------------------------- #
-
 
 @app.route("/health", methods=["GET"])
 def health():
@@ -243,6 +268,7 @@ def process():
     # ---- decode image ----
     try:
         img_bgr = _decode_image(b64_image)
+        logger.info("Image decoded: %dx%d", img_bgr.shape[1], img_bgr.shape[0])
     except Exception as exc:
         logger.warning("Image decode failed: %s", exc)
         return jsonify({"error": f"Image decode error: {exc}"}), 400
@@ -261,7 +287,6 @@ def process():
 
     # ---- build response ----
     if fmt == "html":
-        from src import render_html
         html_text = render_html(blocks)
         resp = make_response(html_text)
         resp.headers["Content-Type"] = "text/html; charset=utf-8"
@@ -273,7 +298,6 @@ def process():
 # --------------------------------------------------------------------------- #
 #  Worker pool management                                                     #
 # --------------------------------------------------------------------------- #
-
 
 def _start_workers(
     gpu_ids: List[Optional[int]],
@@ -327,9 +351,7 @@ def _start_workers(
 #  Entry point                                                                #
 # --------------------------------------------------------------------------- #
 
-if __name__ == "__main__":
-    import argparse
-
+def main():
     parser = argparse.ArgumentParser(
         description="PaddleOCR-VL multi-worker HTTP inference server",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
@@ -338,29 +360,34 @@ if __name__ == "__main__":
     parser.add_argument("--port", type=int, default=5000, help="Bind port")
     parser.add_argument(
         "--layout-onnx",
-        required=True,
+        default="/gemini/data-1/model/paddle/paddleocr-layout/pp_doclayoutv3.onnx",
         metavar="PATH",
         help="Path to PP-DocLayoutV3 ONNX model",
     )
     parser.add_argument(
         "--model-path",
-        required=True,
+        default="/gemini/data-1/model/paddle/paddleocr-vl-1.6",
         metavar="PATH",
         help="Local directory or HuggingFace repo id of PaddleOCR-VL",
     )
     parser.add_argument(
         "--device",
-        default="cpu",
+        default=None,
         metavar="SPEC",
         help=(
-            "Device spec controlling the worker pool. "
+            "Device spec controlling the worker pool (default: auto-detect). "
+            "If not specified, auto-detects GPUs and starts one worker per GPU, "
+            "or falls back to CPU if no GPUs are available. "
             "'cpu' starts a single CPU worker. "
+            "'cuda' or 'cuda:0' starts one worker on GPU 0. "
             "'cuda:<id>[,<id>,...]' starts one worker per listed GPU id "
             "(the same id may appear multiple times to run several workers on one GPU), "
             "e.g. 'cuda:0,0,1,1' starts 4 workers — 2 on GPU 0, 2 on GPU 1. "
             "IDs are logical indices and respect the CUDA_VISIBLE_DEVICES env var."
         ),
     )
+    parser.add_argument("--debug", action="store_true", help="Enable Flask debug mode")
+
     args = parser.parse_args()
 
     try:
@@ -380,6 +407,7 @@ if __name__ == "__main__":
     # inheritance issues that can arise with the default 'fork' on Linux.
     ctx = mp.get_context("spawn")
 
+    global _task_queue
     _task_queue, _processes = _start_workers(
         gpu_ids=gpu_ids,
         layout_onnx=args.layout_onnx,
@@ -391,4 +419,8 @@ if __name__ == "__main__":
     # threaded=True: Flask handles concurrent HTTP requests in separate threads;
     # each thread blocks on _dispatch() waiting for an idle worker, so the
     # effective parallelism is bounded by the number of inference workers.
-    app.run(host=args.host, port=args.port, debug=False, threaded=True)
+    app.run(host=args.host, port=args.port, debug=args.debug, threaded=True)
+
+
+if __name__ == "__main__":
+    main()

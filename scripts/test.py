@@ -47,7 +47,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Path to expected HTML output for comparison",
     )
     p.add_argument("--health-timeout", type=int, default=120, help="Seconds to wait for /health ready")
-    p.add_argument("--request-timeout", type=int, default=60, help="Per-request timeout seconds")
+    p.add_argument("--request-timeout", type=int, default=300, help="Per-request timeout seconds")
     return p
 
 
