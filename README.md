@@ -73,19 +73,19 @@ git clone https://huggingface.co/PaddlePaddle/PaddleOCR-VL-1.6 \
 
 ```bash
 # CPU 单 worker
-python scripts/server.py \
+python -m scripts.server \
     --layout-onnx /path/to/pp_doclayoutv3.onnx \
     --model-path /path/to/paddleocr-vl-1.6 \
     --device cpu
 
 # 单 GPU（1 个 worker，使用 GPU 0）
-CUDA_VISIBLE_DEVICES=0 python scripts/server.py \
+CUDA_VISIBLE_DEVICES=0 python -m scripts.server \
     --layout-onnx /path/to/pp_doclayoutv3.onnx \
     --model-path /path/to/paddleocr-vl-1.6 \
     --device cuda:0
 
 # 多卡多 worker（2 张卡，每卡 2 个 worker，共 4 个 worker）
-CUDA_VISIBLE_DEVICES=0,1 python scripts/server.py \
+CUDA_VISIBLE_DEVICES=0,1 python -m scripts.server \
     --layout-onnx /path/to/pp_doclayoutv3.onnx \
     --model-path /path/to/paddleocr-vl-1.6 \
     --device cuda:0,0,1,1 \
@@ -96,6 +96,7 @@ CUDA_VISIBLE_DEVICES=0,1 python scripts/server.py \
 
 | 值 | worker 数 | 说明 |
 |---|:---:|---|
+| `auto` | 自动检测 | 优先使用 GPU（如果可用，每个 GPU 一个 worker），否则使用 CPU |
 | `cpu` | 1 | 单 CPU worker |
 | `cuda` | 1 | 等价于 `cuda:0`（简写） |
 | `cuda:0` | 1 | GPU 0 上的 1 个 worker |
@@ -128,7 +129,7 @@ GPU 序号为逻辑编号，受环境变量 `CUDA_VISIBLE_DEVICES` 控制。例�
 - `format=json`：返回结构化 JSON，格式为 `{"blocks": [{"label": "...", "content": "..."}, ...]}`
 - `format=html`：返回完整 HTML 页面（含 MathJax），可直接在浏览器中展示
 
-### scripts/test.py — 并发性能测试
+### python -m scripts.test — 并发性能测试
 
 用于测试 HTTP 推理服务的并发处理能力和输出正确性。该脚本向运行中的服务器发送多个并发请求，使用相同的测试图片，验证响应的 HTML 与预期输出是否一致，并汇总统计结果。
 
@@ -144,18 +145,18 @@ GPU 序号为逻辑编号，受环境变量 `CUDA_VISIBLE_DEVICES` 控制。例�
 
 ```bash
 # 默认配置：本地服务器 127.0.0.1:5000，8 个并发请求
-python scripts/test.py
+python -m scripts.test
 
 # 自定义并发数和服务器地址
-python scripts/test.py --concurrency 16 --host 192.168.1.100 --port 8080
+python -m scripts.test --concurrency 16 --host 192.168.1.100 --port 8080
 
 # 指定不同的测试图片和预期输出
-python scripts/test.py \
+python -m scripts.test \
     --image sample/wlyy/a_0.jpg \
     --expected output/wlyy/a_0.html
 
 # 调整超时时间
-python scripts/test.py \
+python -m scripts.test \
     --health-timeout 60 \
     --request-timeout 120
 ```

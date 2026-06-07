@@ -15,10 +15,6 @@ load-balanced concurrency.
 """
 from __future__ import annotations
 
-import sys
-from pathlib import Path
-sys.path.insert(0, str(Path(__file__).parent.parent))
-
 import argparse
 import base64
 import logging
@@ -61,12 +57,12 @@ _workers_ready: bool = False
 def parse_device(device_str: Optional[str]) -> List[Optional[int]]:
     """Parse a device spec string into a list of GPU IDs (``None`` = CPU).
 
-    If device_str is None, auto-detects: returns one GPU worker per available GPU,
+    If device_str is "auto", auto-detects: returns one GPU worker per available GPU,
     or [None] if no GPUs are available.
 
     Examples::
 
-        None            -> [0, 1, ...]     # auto-detect: one worker per GPU (or [None] if no GPU)
+        "auto"          -> [0, 1, ...]     # auto-detect: one worker per GPU (or [None] if no GPU)
         "cpu"           -> [None]           # single CPU worker
         "cuda"          -> [0]              # one worker on GPU 0
         "cuda:0"        -> [0]              # one worker on GPU 0
@@ -74,7 +70,7 @@ def parse_device(device_str: Optional[str]) -> List[Optional[int]]:
 
     GPU indices are logical indices and respect ``CUDA_VISIBLE_DEVICES``.
     """
-    if device_str is None:
+    if device_str is None or (isinstance(device_str, str) and device_str.strip().lower() == "auto"):
         # Auto-detect: try to import torch and check CUDA availability
         try:
             if torch.cuda.is_available():
@@ -372,11 +368,11 @@ def main():
     )
     parser.add_argument(
         "--device",
-        default=None,
+        default="auto",
         metavar="SPEC",
         help=(
-            "Device spec controlling the worker pool (default: auto-detect). "
-            "If not specified, auto-detects GPUs and starts one worker per GPU, "
+            "Device spec controlling the worker pool (default: 'auto'). "
+            "'auto' auto-detects GPUs and starts one worker per GPU, "
             "or falls back to CPU if no GPUs are available. "
             "'cpu' starts a single CPU worker. "
             "'cuda' or 'cuda:0' starts one worker on GPU 0. "
