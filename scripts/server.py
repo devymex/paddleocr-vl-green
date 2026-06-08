@@ -114,7 +114,7 @@ def _worker_fn(
 ) -> None:
     """Runs in a child process: loads models once, then handles tasks from *task_queue*.
 
-    Each task is a tuple ``(img_bgr, fmt, child_conn)`` where *child_conn* is the
+    Each task is a tuple ``(img_bgr, fmt, enable_layout, child_conn)`` where *child_conn* is the
     write end of a :func:`multiprocessing.Pipe`.  Results (or errors) are sent back
     through *child_conn* as a dict ``{"ok": bool, ...}``.
 
@@ -161,10 +161,10 @@ def _worker_fn(
         if item is None:          # poison pill → clean shutdown
             log.info("Received shutdown signal. Exiting.")
             break
-        img_bgr, fmt, child_conn = item
+        img_bgr, fmt, enable_layout, child_conn = item
         try:
-            log.info("Processing image h=%d w=%d fmt=%s", *img_bgr.shape[:2], fmt)
-            blocks = _run_pipeline(img_bgr, layout, vl)
+            log.info("Processing image h=%d w=%d fmt=%s layout=%s", *img_bgr.shape[:2], fmt, enable_layout)
+            blocks = _run_pipeline(img_bgr, layout, vl, enable_layout=enable_layout)
             log.info("Done — %d blocks.", len(blocks))
             child_conn.send({"ok": True, "blocks": blocks})
         except Exception as exc:
@@ -190,14 +190,20 @@ def _decode_image(b64_str: str) -> np.ndarray:
     return img
 
 
-def _dispatch(img_bgr: np.ndarray, fmt: str) -> dict:
+def _dispatch(img_bgr: np.ndarray, fmt: str, enable_layout: bool = True) -> dict:
     """Submit an inference task to the worker pool and block until the result arrives.
 
     Thread-safe: each call creates its own :func:`multiprocessing.Pipe` so
     concurrent Flask threads do not mix up results.
+
+    Args:
+        img_bgr: Input image in BGR format.
+        fmt: Output format ("json" or "html").
+        enable_layout: Whether to perform layout detection (default: True).
+                       If False, recognize entire image as single text block.
     """
     parent_conn, child_conn = mp.Pipe(duplex=False)
-    _task_queue.put((img_bgr, fmt, child_conn))  # type: ignore[union-attr]
+    _task_queue.put((img_bgr, fmt, enable_layout, child_conn))  # type: ignore[union-attr]
     result: dict = parent_conn.recv()
     parent_conn.close()
     return result
@@ -227,9 +233,12 @@ def process():
     ``image``  — **required** base64-encoded image (JPEG / PNG).
                  A ``data:image/...;base64,`` prefix is accepted and stripped.
     ``format`` — ``"json"`` (default) or ``"html"``.
+    ``layout`` — ``true`` (default) or ``false``. Whether to perform layout detection.
+                 If ``true``, detect regions and recognize each separately.
+                 If ``false``, recognize entire image as a single text block.
 
-    JSON response (``format=json``)
-    --------------------------------
+    JSON response (``format=json, layout=true``)
+    ---------------------------------------------
     .. code-block:: json
 
         {
@@ -237,6 +246,16 @@ def process():
                 {"label": "paragraph_title", "content": "Introduction"},
                 {"label": "text",            "content": "Lorem ipsum ..."},
                 {"label": "table",           "content": "<table>...</table>"}
+            ]
+        }
+
+    JSON response (``format=json, layout=false``)
+    -----------------------------------------------
+    .. code-block:: json
+
+        {
+            "blocks": [
+                {"label": "text", "content": "Entire document text ..."}
             ]
         }
 
@@ -261,6 +280,11 @@ def process():
     if fmt not in ("json", "html"):
         return jsonify({"error": "'format' must be 'json' or 'html'."}), 400
 
+    # Default to True if 'layout' is not provided
+    enable_layout = body.get("layout", True)
+    if not isinstance(enable_layout, bool):
+        return jsonify({"error": "'layout' must be a boolean (true or false)."}), 400
+
     # ---- decode image ----
     try:
         img_bgr = _decode_image(b64_image)
@@ -271,7 +295,7 @@ def process():
 
     # ---- dispatch to worker pool ----
     try:
-        result = _dispatch(img_bgr, fmt)
+        result = _dispatch(img_bgr, fmt, enable_layout=enable_layout)
     except Exception as exc:
         logger.exception("Dispatch error")
         return jsonify({"error": f"Processing error: {exc}"}), 500

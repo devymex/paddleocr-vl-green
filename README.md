@@ -6,10 +6,14 @@
 
 **核心目标**：脱离对官方工程（PaddlePaddle、PaddleX、PaddleOCR 等）的直接依赖，改用通用的 Python 生态实现，兼容最新版本的 Python、PyTorch 和 Transformers，可直接安装运行。
 
-推理流程：
-1. **版面检测**：使用 PP-DocLayoutV3 ONNX 模型检测文档中各区域的类型和位置（标题、正文、表格、公式、图片等）；
-2. **内容识别**：对每个区域裁图后送入 PaddleOCR-VL-1.6 视觉语言模型进行识别；
+推理流程（默认启用版面检测）：
+1. **版面检测**（可选）：使用 PP-DocLayoutV3 ONNX 模型检测文档中各区域的类型和位置（标题、正文、表格、公式、图片等）；
+2. **内容识别**：对每个区域裁图后送入 PaddleOCR-VL-1.6 视觉语言模型进行识别；或直接识别整个图片（禁用版面检测时）；
 3. **HTML 生成**：将识别结果（含 OTSL 表格、LaTeX 公式）渲染为可在浏览器中直接查看的 HTML 文件。
+
+**灵活的识别模式：**
+- **版面检测模式**（`layout=true`，默认）：先检测文档结构，分别识别标题、正文、表格等，返回多种内容类型，适合结构化文档。
+- **直接识别模式**（`layout=false`）：跳过版面检测，直接识别整个图片，返回单块文本，适合简单或非结构化文档。
 
 ## 环境准备
 
@@ -125,9 +129,37 @@ GPU 序号为逻辑编号，受环境变量 `CUDA_VISIBLE_DEVICES` 控制。例�
 |---|:---:|---|
 | `image` | ✅ | base64 编码的图片（JPEG / PNG），支持 `data:image/...;base64,` 前缀 |
 | `format` | | `"json"`（默认）或 `"html"` |
+| `layout` | | `true`（默认）或 `false`。是否启用版面检测 |
+
+**`format` 参数说明：**
 
 - `format=json`：返回结构化 JSON，格式为 `{"blocks": [{"label": "...", "content": "..."}, ...]}`
 - `format=html`：返回完整 HTML 页面（含 MathJax），可直接在浏览器中展示
+
+**`layout` 参数说明：**
+
+- `layout=true`（默认）：启用版面检测，先检测文档中各区域的类型（标题、正文、表格等），再对每个区域分别进行识别，最后按阅读顺序返回结构化结果。输出可能包含多种标签（`paragraph_title`、`text`、`table`、`formula` 等）。
+
+- `layout=false`：禁用版面检测，直接识别整个图片，返回单个 text 块。响应格式统一为 `{"blocks": [{"label": "text", "content": "..."}]}`，无论 HTML 还是 JSON，输出都当做一整块文本处理。
+
+**示例请求：**
+
+```bash
+# 启用版面检测（默认）
+curl -X POST http://localhost:5000/process \
+  -H "Content-Type: application/json" \
+  -d '{"image": "data:image/jpeg;base64,...", "format": "json", "layout": true}'
+
+# 禁用版面检测，直接识别整个图片
+curl -X POST http://localhost:5000/process \
+  -H "Content-Type: application/json" \
+  -d '{"image": "data:image/jpeg;base64,...", "format": "json", "layout": false}'
+
+# 返回 HTML（版面检测结果）
+curl -X POST http://localhost:5000/process \
+  -H "Content-Type: application/json" \
+  -d '{"image": "data:image/jpeg;base64,...", "format": "html"}'
+```
 
 ### python -m scripts.test — 并发性能测试
 

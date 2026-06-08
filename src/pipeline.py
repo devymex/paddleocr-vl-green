@@ -16,13 +16,33 @@ def run_pipeline(
     img_bgr: np.ndarray,
     layout: LayoutDetector,
     vl: VLRecognizer,
+    enable_layout: bool = True,
 ) -> List[dict]:
     """Run layout detection + VL recognition on a BGR image array.
 
-    Returns a list of ``{"label": str, "content": str}`` dicts in reading order.
+    Args:
+        img_bgr: Input image in BGR format.
+        layout: LayoutDetector instance for region detection.
+        vl: VLRecognizer instance for content recognition.
+        enable_layout: If True, perform layout detection and process each region separately.
+                       If False, recognize the entire image as a single text block.
+
+    Returns:
+        A list of ``{"label": str, "content": str}`` dicts in reading order.
+        If ``enable_layout=False``, returns a single block with label "text".
     """
-    boxes = layout(img_bgr)
     blocks: List[dict] = []
+
+    if not enable_layout:
+        # Recognize the entire image as a single text block
+        query = prompt_for_block("text")
+        text = vl.recognise(img_bgr, query)
+        text = normalize_formula(text, "text")
+        blocks.append({"label": "text", "content": text})
+        return blocks
+
+    # Layout-enabled pipeline: detect regions and recognize each
+    boxes = layout(img_bgr)
 
     for det in boxes:
         label = det["label"]
