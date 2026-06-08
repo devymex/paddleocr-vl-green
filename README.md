@@ -62,6 +62,7 @@ paddle2onnx \
 **获取朝向检测模型：**
 
 **方式一：从百度网盘下载（推荐）**
+
 百度网盘链接：https://pan.baidu.com/s/150uYyaJ5qflU0fy_SP7p1A?pwd=h3qq
 
 **方式二：使用 paddle2onnx 自行转换（需要 PaddlePaddle 环境）**
