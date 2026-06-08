@@ -26,7 +26,7 @@ import numpy as np
 import torch
 
 from flask import Flask, jsonify, make_response, request
-from src import render_html, LayoutDetector, VLRecognizer, run_pipeline as _run_pipeline
+from src import render_html, LayoutDetector, VLRecognizer, OrientationDetector, run_pipeline as _run_pipeline
 
 # --------------------------------------------------------------------------- #
 #  Logging                                                                    #
@@ -48,6 +48,7 @@ app.config["MAX_CONTENT_LENGTH"] = 100 * 1024 * 1024  # 100 MB max request
 # Set by _start_workers(); accessed by Flask route handlers in the main process.
 _task_queue: Optional[mp.queues.Queue] = None  # type: ignore[type-arg]
 _workers_ready: bool = False
+_ori_detector: Optional[OrientationDetector] = None
 
 
 # --------------------------------------------------------------------------- #
@@ -230,15 +231,18 @@ def process():
 
     Request body (JSON)
     -------------------
-    ``image``  — **required** base64-encoded image (JPEG / PNG).
-                 A ``data:image/...;base64,`` prefix is accepted and stripped.
-    ``format`` — ``"json"`` (default) or ``"html"``.
-    ``layout`` — ``true`` (default) or ``false``. Whether to perform layout detection.
-                 If ``true``, detect regions and recognize each separately.
-                 If ``false``, recognize entire image as a single text block.
+    ``image``      — **required** base64-encoded image (JPEG / PNG).
+                     A ``data:image/...;base64,`` prefix is accepted and stripped.
+    ``format``     — ``"json"`` (default) or ``"html"``.
+    ``layout``     — ``true`` (default) or ``false``. Whether to perform layout detection.
+                     If ``true``, detect regions and recognize each separately.
+                     If ``false``, recognize entire image as a single text block.
+    ``orientation`` — ``true`` or ``false`` (default). Whether to detect and correct document orientation.
+                      Requires orientation model to be loaded at server startup.
+                      Only applicable for ``format=json``.
 
-    JSON response (``format=json, layout=true``)
-    ---------------------------------------------
+    JSON response (``format=json, layout=true, orientation=false``)
+    ---------------------------------------------------------------
     .. code-block:: json
 
         {
@@ -247,6 +251,15 @@ def process():
                 {"label": "text",            "content": "Lorem ipsum ..."},
                 {"label": "table",           "content": "<table>...</table>"}
             ]
+        }
+
+    JSON response (``format=json, layout=true, orientation=true``)
+    ---------------------------------------------------------------
+    .. code-block:: json
+
+        {
+            "blocks": [...],
+            "orientation": 90
         }
 
     JSON response (``format=json, layout=false``)
@@ -285,6 +298,15 @@ def process():
     if not isinstance(enable_layout, bool):
         return jsonify({"error": "'layout' must be a boolean (true or false)."}), 400
 
+    # Default to False if 'orientation' is not provided
+    enable_orientation = body.get("orientation", False)
+    if not isinstance(enable_orientation, bool):
+        return jsonify({"error": "'orientation' must be a boolean (true or false)."}), 400
+
+    # Check if orientation is requested but not supported
+    if enable_orientation and _ori_detector is None:
+        return jsonify({"error": "Orientation detection is not available. Server was not started with --orientation-onnx parameter."}), 400
+
     # ---- decode image ----
     try:
         img_bgr = _decode_image(b64_image)
@@ -292,6 +314,20 @@ def process():
     except Exception as exc:
         logger.warning("Image decode failed: %s", exc)
         return jsonify({"error": f"Image decode error: {exc}"}), 400
+
+    # ---- detect and correct orientation (in main process) ----
+    detected_orientation: Optional[int] = None
+    if enable_orientation and _ori_detector is not None:
+        try:
+            result = _ori_detector.predict(img_bgr)
+            detected_orientation = result.get("orientation")
+            if detected_orientation is not None and detected_orientation != 0:
+                logger.info("Detected orientation: %d degrees", detected_orientation)
+                img_bgr = _ori_detector.correct_image(img_bgr, detected_orientation)
+                logger.info("Image corrected from %d degrees to 0 degrees", detected_orientation)
+        except Exception as exc:
+            logger.exception("Orientation detection error")
+            return jsonify({"error": f"Orientation detection error: {exc}"}), 500
 
     # ---- dispatch to worker pool ----
     try:
@@ -312,7 +348,11 @@ def process():
         resp.headers["Content-Type"] = "text/html; charset=utf-8"
         return resp
 
-    return jsonify({"blocks": blocks})
+    response = {"blocks": blocks}
+    if enable_orientation and detected_orientation is not None:
+        response["orientation"] = detected_orientation
+
+    return jsonify(response)
 
 
 # --------------------------------------------------------------------------- #
@@ -323,13 +363,24 @@ def _start_workers(
     gpu_ids: List[Optional[int]],
     layout_onnx: str,
     model_path: str,
+    orientation_onnx: Optional[str],
     ctx,  # multiprocessing context (spawn / fork / forkserver)
 ) -> tuple:
     """Spawn worker processes and block until every worker reports ready.
 
     Returns ``(task_queue, processes)``.
     """
-    global _workers_ready
+    global _workers_ready, _ori_detector
+
+    # Load orientation detector in main process if specified
+    if orientation_onnx is not None:
+        try:
+            logger.info("Loading OrientationDetector from %s …", orientation_onnx)
+            _ori_detector = OrientationDetector(orientation_onnx)
+            logger.info("OrientationDetector loaded successfully.")
+        except Exception as exc:
+            logger.error("Failed to load OrientationDetector: %s", exc)
+            raise
 
     task_queue = ctx.Queue()
     ready_queue = ctx.Queue()
@@ -379,16 +430,22 @@ def main():
     parser.add_argument("--host", default="0.0.0.0", help="Bind host")
     parser.add_argument("--port", type=int, default=5000, help="Bind port")
     parser.add_argument(
+        "--model-path",
+        required=True,
+        metavar="PATH",
+        help="Local directory or HuggingFace repo id of PaddleOCR-VL",
+    )
+    parser.add_argument(
         "--layout-onnx",
-        default="/gemini/data-1/model/paddle/paddleocr-layout/pp_doclayoutv3.onnx",
+        required=True,
         metavar="PATH",
         help="Path to PP-DocLayoutV3 ONNX model",
     )
     parser.add_argument(
-        "--model-path",
-        default="/gemini/data-1/model/paddle/paddleocr-vl-1.6",
+        "--orientation-onnx",
+        default=None,
         metavar="PATH",
-        help="Local directory or HuggingFace repo id of PaddleOCR-VL",
+        help="Path to PP-LCNet orientation detection ONNX model (optional). If not specified, orientation detection is disabled.",
     )
     parser.add_argument(
         "--device",
@@ -432,6 +489,7 @@ def main():
         gpu_ids=gpu_ids,
         layout_onnx=args.layout_onnx,
         model_path=args.model_path,
+        orientation_onnx=args.orientation_onnx,
         ctx=ctx,
     )
 

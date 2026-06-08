@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import base64
 from typing import List
 
+import cv2
 import numpy as np
 
 from .otsl_to_html import convert_otsl_to_html
@@ -52,7 +54,14 @@ def run_pipeline(
             continue
 
         if label in IMAGE_LABELS:
-            blocks.append({"label": label, "content": label})
+            # Encode the cropped image as base64
+            _, buffer = cv2.imencode('.png', crop)
+            image_base64 = base64.b64encode(buffer).decode('utf-8')
+            blocks.append({
+                "label": label,
+                "content": label,
+                "image_base64": image_base64
+            })
             continue
 
         query = prompt_for_block(label)

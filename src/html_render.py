@@ -50,14 +50,20 @@ MathJax = {{
 """
 
 
-def block_to_html(label: str, content: str) -> str:
-    label = label.lower()
+def block_to_html(block: dict) -> str:
+    label = block["label"].lower()
+    content = block["content"]
+    image_base64 = block.get("image_base64")
+
     if label in TABLE_LABELS:
         return f'<div class="block table-block">\n{content}\n</div>'
     if label in FORMULA_LABELS:
         return f'<div class="block formula-block">\\[{html_lib.escape(content)}\\]</div>'
     if label in PIC_LABELS:
-        return f'<div class="block image-block"><p>[图片: {html_lib.escape(content)}]</p></div>'
+        if image_base64:
+            return f'<div class="block image-block"><img src="data:image/png;base64,{image_base64}" style="max-width: 100%; height: auto;" /></div>'
+        else:
+            return f'<div class="block image-block"><p>[图片: {html_lib.escape(content)}]</p></div>'
     if label in TITLE_LABELS:
         return f'<h1 class="block doc-title">{html_lib.escape(content)}</h1>'
     if label in HEADING_LABELS:
@@ -77,6 +83,6 @@ def render_html(blocks: List[dict], title: str = "document") -> str:
         content = b["content"]
         if not content or label in DROP_LABELS:
             continue
-        parts.append(block_to_html(label, content))
+        parts.append(block_to_html(b))
     body = '<div class="page" id="page-1">\n' + "\n".join(parts) + "\n</div>"
     return HTML_TEMPLATE.format(title=html_lib.escape(title), body=body)

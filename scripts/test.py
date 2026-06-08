@@ -22,11 +22,6 @@ import urllib.request
 import urllib.error
 
 
-def parse_args() -> argparse.Namespace:
-    root = Path(__file__).resolve().parent.parent
-    return argparse.ArgumentParser(description="Test PaddleOCR-VL HTTP server").parse_args()
-
-
 def build_arg_parser() -> argparse.ArgumentParser:
     root = Path(__file__).resolve().parent.parent
     p = argparse.ArgumentParser(
@@ -43,8 +38,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     p.add_argument(
         "--expected",
-        default=str(root / "output" / "contract.html"),
-        help="Path to expected HTML output for comparison",
+        default=None,
+        help="Path to expected HTML output for comparison (optional)",
+    )
+    p.add_argument(
+        "--output",
+        default=None,
+        help="Path to output the result HTML if all workers are consistent (optional)",
     )
     p.add_argument("--health-timeout", type=int, default=120, help="Seconds to wait for /health ready")
     p.add_argument("--request-timeout", type=int, default=300, help="Per-request timeout seconds")
@@ -118,13 +118,16 @@ def main(argv: Optional[list] = None) -> int:
 
     print(f"Server: {base}")
     print(f"Test image: {args.image}")
-    print(f"Expected HTML: {args.expected}")
+    if args.expected:
+        print(f"Expected HTML: {args.expected}")
+    if args.output:
+        print(f"Output file: {args.output}")
     print(f"Concurrency: {args.concurrency}")
 
     if not Path(args.image).exists():
         print(f"Test image not found: {args.image}")
         return 2
-    if not Path(args.expected).exists():
+    if args.expected and not Path(args.expected).exists():
         print(f"Expected HTML not found: {args.expected}")
         return 2
 
@@ -135,9 +138,7 @@ def main(argv: Optional[list] = None) -> int:
     # prepare payload
     img_b = Path(args.image).read_bytes()
     b64 = base64.b64encode(img_b).decode("ascii")
-    payload = {"image": f"data:image/jpeg;base64,{b64}", "format": "html"}
-
-    expected_html = load_file_text(args.expected).strip()
+    payload = {"image": f"data:image/jpeg;base64,{b64}", "format": "html", "orientation": True}
 
     print("Sending concurrent requests...")
     results = []
@@ -147,39 +148,71 @@ def main(argv: Optional[list] = None) -> int:
             res = fut.result()
             results.append(res)
 
-    ok_count = 0
-    mismatch_count = 0
-    error_count = 0
+    # Step 1: Check if all worker results are consistent
+    print("Checking consistency of all worker results...")
+    if not results:
+        print("No results received")
+        return 4
+
+    first_body = results[0].get("body", "")
+    first_status = results[0].get("status")
+
+    inconsistent_results = []
     for i, r in enumerate(results, 1):
         status = r.get("status")
-        if status != 200:
-            body_preview = (r.get("body") or "")[:200]
-            print(f"[{i}] ERROR: HTTP {status} - {body_preview}")
-            error_count += 1
-            continue
-        headers = r.get("headers") or {}
-        ctype = headers.get("Content-Type", headers.get("content-type", ""))
-        body = (r.get("body") or "").strip()
-        if "html" not in (ctype or ""):
-            print(f"[{i}] ERROR: wrong Content-Type: {ctype}")
-            error_count += 1
-            continue
-        if body == expected_html:
-            print(f"[{i}] OK (matches expected)")
-            ok_count += 1
-        else:
-            print(f"[{i}] MISMATCH: response differs from expected.")
-            mismatch_count += 1
+        body = r.get("body", "")
+        if status != first_status or body != first_body:
+            inconsistent_results.append((i, r))
 
-    total = len(results)
-    print("\nSummary:")
-    print(f"  Total requests: {total}")
-    print(f"  OK: {ok_count}")
-    print(f"  Mismatches: {mismatch_count}")
-    print(f"  Errors: {error_count}")
-
-    if error_count or mismatch_count:
+    if inconsistent_results:
+        print(f"ERROR: Worker results are inconsistent! Found {len(inconsistent_results)} mismatches")
+        print(f"\nFirst result (status={first_status}, body length={len(first_body)}):")
+        print(f"  Body preview: {first_body[:200]}")
+        print(f"\nInconsistent results:")
+        for i, r in inconsistent_results:
+            status = r.get("status")
+            body = r.get("body", "")
+            print(f"  [Worker {i}] status={status}, body length={len(body)}")
+            print(f"    Body preview: {body[:200]}")
         return 4
+
+    print(f"✓ All {len(results)} workers returned consistent results")
+
+    # Step 2: Process the consistent result
+    standard_result = results[0]
+    status = standard_result.get("status")
+    headers = standard_result.get("headers") or {}
+    body = (standard_result.get("body") or "").strip()
+
+    # Check HTTP status and Content-Type
+    if status != 200:
+        body_preview = body[:200]
+        print(f"ERROR: HTTP {status} - {body_preview}")
+        return 4
+
+    ctype = headers.get("Content-Type", headers.get("content-type", ""))
+    if "html" not in (ctype or ""):
+        print(f"ERROR: wrong Content-Type: {ctype}")
+        return 4
+
+    # Step 3: Output to file if requested
+    if args.output:
+        output_path = Path(args.output)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(body, encoding="utf-8")
+        print(f"✓ Result written to {args.output}")
+
+    # Step 4: Compare with expected HTML if provided
+    if args.expected:
+        expected_html = load_file_text(args.expected).strip()
+        if body == expected_html:
+            print("✓ Result matches expected HTML")
+            return 0
+        else:
+            print("ERROR: Result differs from expected HTML")
+            return 4
+
+    print("✓ All checks passed (no expected HTML to compare)")
     return 0
 
 

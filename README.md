@@ -7,13 +7,15 @@
 **核心目标**：脱离对官方工程（PaddlePaddle、PaddleX、PaddleOCR 等）的直接依赖，改用通用的 Python 生态实现，兼容最新版本的 Python、PyTorch 和 Transformers，可直接安装运行。
 
 推理流程（默认启用版面检测）：
-1. **版面检测**（可选）：使用 PP-DocLayoutV3 ONNX 模型检测文档中各区域的类型和位置（标题、正文、表格、公式、图片等）；
-2. **内容识别**：对每个区域裁图后送入 PaddleOCR-VL-1.6 视觉语言模型进行识别；或直接识别整个图片（禁用版面检测时）；
-3. **HTML 生成**：将识别结果（含 OTSL 表格、LaTeX 公式）渲染为可在浏览器中直接查看的 HTML 文件。
+1. **朝向检测**（可选）：使用 PP-LCNet 朝向分类模型检测文档的旋转角度（0°、90°、180°、270°），对非正常朝向的文档进行自动纠正；
+2. **版面检测**（可选）：使用 PP-DocLayoutV3 ONNX 模型检测文档中各区域的类型和位置（标题、正文、表格、公式、图片等）；
+3. **内容识别**：对每个区域裁图后送入 PaddleOCR-VL-1.6 视觉语言模型进行识别；或直接识别整个图片（禁用版面检测时）；
+4. **HTML 生成**：将识别结果（含 OTSL 表格、LaTeX 公式）渲染为可在浏览器中直接查看的 HTML 文件。
 
 **灵活的识别模式：**
 - **版面检测模式**（`layout=true`，默认）：先检测文档结构，分别识别标题、正文、表格等，返回多种内容类型，适合结构化文档。
 - **直接识别模式**（`layout=false`）：跳过版面检测，直接识别整个图片，返回单块文本，适合简单或非结构化文档。
+- **朝向纠正模式**（`orientation=true`，默认关闭）：先检测文档朝向，对非0°的文档自动进行角度纠正，适合旋转的文档输入。仅在 JSON 输出时返回检测到的朝向角度。
 
 ## 环境准备
 
@@ -53,6 +55,26 @@ paddle2onnx \
   --opset_version 16 --enable_onnx_checker True
 ```
 
+### 获取朝向检测模型（pp_lcnet_doc_ori.onnx）— 可选
+
+朝向检测模型是可选的，仅当需要处理旋转的文档时才需要获取。如果不指定模型路径，服务器将在用户请求中指定 `orientation: true` 时返回错误。
+
+**获取朝向检测模型：**
+
+**方式一：从百度网盘下载（推荐）**
+百度网盘链接：https://pan.baidu.com/s/150uYyaJ5qflU0fy_SP7p1A?pwd=h3qq
+
+**方式二：使用 paddle2onnx 自行转换（需要 PaddlePaddle 环境）**
+
+```bash
+paddle2onnx \
+  --model_dir ~/.paddlex/official_models/PP-LCNet_x1_0_doc_ori \
+  --model_filename inference.pdmodel \
+  --params_filename inference.pdiparams \
+  --save_file pp_docorix1.onnx \
+  --opset_version 16 --enable_onnx_checker True
+```
+
 ### 获取 VL 识别模型（PaddleOCR-VL-1.6）
 
 脚本支持从 HuggingFace 自动下载，但网络较慢时耗时较长，**建议提前手动下载**后通过 `--model-path` 参数指定本地路径。
@@ -78,22 +100,29 @@ git clone https://huggingface.co/PaddlePaddle/PaddleOCR-VL-1.6 \
 ```bash
 # CPU 单 worker
 python -m scripts.server \
-    --layout-onnx /path/to/pp_doclayoutv3.onnx \
     --model-path /path/to/paddleocr-vl-1.6 \
+    --layout-onnx /path/to/pp_doclayoutv3.onnx \
     --device cpu
 
 # 单 GPU（1 个 worker，使用 GPU 0）
 CUDA_VISIBLE_DEVICES=0 python -m scripts.server \
-    --layout-onnx /path/to/pp_doclayoutv3.onnx \
     --model-path /path/to/paddleocr-vl-1.6 \
+    --layout-onnx /path/to/pp_doclayoutv3.onnx \
     --device cuda:0
 
 # 多卡多 worker（2 张卡，每卡 2 个 worker，共 4 个 worker）
 CUDA_VISIBLE_DEVICES=0,1 python -m scripts.server \
-    --layout-onnx /path/to/pp_doclayoutv3.onnx \
     --model-path /path/to/paddleocr-vl-1.6 \
+    --layout-onnx /path/to/pp_doclayoutv3.onnx \
     --device cuda:0,0,1,1 \
     [--host 0.0.0.0] [--port 5000]
+
+# 启用朝向检测
+CUDA_VISIBLE_DEVICES=0 python -m scripts.server \
+    --model-path /path/to/paddleocr-vl-1.6 \
+    --layout-onnx /path/to/pp_doclayoutv3.onnx \
+    --orientation-onnx /path/to/pp_docorix1.onnx \
+    --device cuda:0
 ```
 
 **`--device` 参数说明：**
@@ -108,6 +137,10 @@ CUDA_VISIBLE_DEVICES=0,1 python -m scripts.server \
 | `cuda:0,0,1,1` | 4 | GPU 0 和 GPU 1 各 2 个 worker |
 
 GPU 序号为逻辑编号，受环境变量 `CUDA_VISIBLE_DEVICES` 控制。例如设置 `CUDA_VISIBLE_DEVICES=2,3` 后，`--device cuda:0,1` 实际使用物理 GPU 2 和 3。
+
+**`--orientation-onnx` 参数说明：**
+
+朝向检测模型的 ONNX 文件路径。如果未指定，则服务器不支持朝向检测功能。当用户在请求中指定 `orientation: true` 但服务器未加载该模型时，将返回错误。
 
 **并发处理机制：**
 
@@ -130,6 +163,7 @@ GPU 序号为逻辑编号，受环境变量 `CUDA_VISIBLE_DEVICES` 控制。例�
 | `image` | ✅ | base64 编码的图片（JPEG / PNG），支持 `data:image/...;base64,` 前缀 |
 | `format` | | `"json"`（默认）或 `"html"` |
 | `layout` | | `true`（默认）或 `false`。是否启用版面检测 |
+| `orientation` | | `true` 或 `false`（默认）。是否启用朝向检测和纠正。仅当服务器通过 `--orientation-onnx` 加载了朝向模型时有效 |
 
 **`format` 参数说明：**
 
@@ -141,6 +175,16 @@ GPU 序号为逻辑编号，受环境变量 `CUDA_VISIBLE_DEVICES` 控制。例�
 - `layout=true`（默认）：启用版面检测，先检测文档中各区域的类型（标题、正文、表格等），再对每个区域分别进行识别，最后按阅读顺序返回结构化结果。输出可能包含多种标签（`paragraph_title`、`text`、`table`、`formula` 等）。
 
 - `layout=false`：禁用版面检测，直接识别整个图片，返回单个 text 块。响应格式统一为 `{"blocks": [{"label": "text", "content": "..."}]}`，无论 HTML 还是 JSON，输出都当做一整块文本处理。
+
+**`orientation` 参数说明：**
+
+- `orientation=true`：启用朝向检测。服务器使用朝向分类模型检测文档的旋转角度（0°、90°、180°、270°），对于非 0° 的文档自动进行纠正（逆时针旋转对应的角度）。纠正后的图像进入后续版面检测和内容识别流程。
+
+- `orientation=false`（默认）：禁用朝向检测，跳过该步骤。
+
+- **JSON 响应中的 `orientation` 字段：**当 `orientation=true` 且 `format=json` 时，响应 JSON 中会包含 `orientation` 字段，表示模型检测到的原始朝向角度（单位：度数），可能的值为 0、90、180、270。
+
+- **HTML 响应中的朝向信息：** HTML 格式的响应不包含朝向元数据，但 HTML 内容已基于检测到的朝向进行了纠正。
 
 **示例请求：**
 
@@ -155,11 +199,47 @@ curl -X POST http://localhost:5000/process \
   -H "Content-Type: application/json" \
   -d '{"image": "data:image/jpeg;base64,...", "format": "json", "layout": false}'
 
-# 返回 HTML（版面检测结果）
+# 启用朝向检测和纠正，使用 JSON 格式输出（包含检测到的朝向角度）
 curl -X POST http://localhost:5000/process \
   -H "Content-Type: application/json" \
-  -d '{"image": "data:image/jpeg;base64,...", "format": "html"}'
+  -d '{"image": "data:image/jpeg;base64,...", "format": "json", "orientation": true}'
+
+# 同时启用朝向检测和版面检测
+curl -X POST http://localhost:5000/process \
+  -H "Content-Type: application/json" \
+  -d '{"image": "data:image/jpeg;base64,...", "format": "json", "layout": true, "orientation": true}'
+
+# 返回 HTML（版面检测结果，基于检测到的朝向自动纠正）
+curl -X POST http://localhost:5000/process \
+  -H "Content-Type: application/json" \
+  -d '{"image": "data:image/jpeg;base64,...", "format": "html", "orientation": true}'
 ```
+
+**响应示例：**
+
+启用朝向检测时的 JSON 响应（`orientation=true, format=json`）：
+
+```json
+{
+    "blocks": [
+        {"label": "paragraph_title", "content": "合同标题"},
+        {"label": "text", "content": "合同正文..."}
+    ],
+    "orientation": 90
+}
+```
+
+未启用朝向检测时的 JSON 响应（`orientation=false, format=json`）：
+
+```json
+{
+    "blocks": [
+        {"label": "paragraph_title", "content": "合同标题"},
+        {"label": "text", "content": "合同正文..."}
+    ]
+}
+```
+
 
 ### python -m scripts.test — 并发性能测试
 
